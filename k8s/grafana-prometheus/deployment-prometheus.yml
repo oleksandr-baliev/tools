@@ -1,0 +1,145 @@
+# Simple Prometheus K8S setup with Deployment+Service+Ingress+PersistentVolumeClaim (is used for AWS).
+# Actually Prometheus Operator should be considered for proper set up https://github.com/coreos/prometheus-operator.
+#   But sometimes you don't have access to other namespace other than something/don't have time to request it when you really need it./etc.
+#
+# "prometheus.yml" is configured via ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-simple-conf
+  labels:
+    name: prometheus-simple-conf
+data:
+  prometheus.yml: |-
+    global:
+      scrape_interval: 60s
+      evaluation_interval: 60s
+      scrape_timeout: 20s
+
+    scrape_configs:
+      - job_name: my-job-1
+        static_configs:
+          - targets: ['my-host-1:7878']
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: prometheus-simple-persitence-volume-claim
+spec:
+  storageClassName: gp2
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: prometheus-simple
+    criticality: test
+  name: prometheus-simple
+spec:
+  selector:
+    matchLabels:
+      app: prometheus-simple
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: prometheus-simple
+    spec:
+      containers:
+        - name: prometheus
+          imagePullPolicy: Always
+          image: prom/prometheus:latest
+          args:
+            - "--storage.tsdb.path=/prometheus/data"
+            - "--config.file=/etc/prometheus/prometheus.yml"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          ports:
+            - name: http
+              containerPort: 9090
+          volumeMounts:
+            - name: prometheus-simple-config-volume
+              mountPath: /etc/prometheus/
+            - name: prometheus-simple-storage-volume
+              mountPath: /prometheus/data
+      volumes:
+        - name: prometheus-simple-config-volume
+          configMap:
+            defaultMode: 420
+            name: prometheus-simple-conf
+
+        - name: prometheus-simple-storage-volume
+          persistentVolumeClaim:
+            claimName: prometheus-simple-persitence-volume-claim
+      securityContext:
+        fsGroup: 2000
+        runAsUser: 1000
+        runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-simple
+  labels:
+    app: prometheus-simple
+    criticality: test
+spec:
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: prometheus-simple
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: nginx-private
+    nginx.ingress.kubernetes.io/large-client-header-buffers: number=4 size=32k
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  labels:
+    app: prometheus-simple
+  name: prometheus-simple-test
+spec:
+  rules:
+    - host: prometheus-simple.eks.my-cluster.io
+      http:
+        paths:
+          - backend:
+              serviceName: prometheus-simple
+              servicePort: http
+            path: /
+  tls:
+    - hosts:
+        - prometheus-simple.eks.my-cluster.io
+      secretName: cluster-wildcard-cert
+---
+# Simple headless service, as an example how to grep metrics from a specific POD.
+apiVersion: v1
+kind: Service
+metadata:
+  name: authn-keycloak-prometheus-headless-0
+  labels:
+    app: prometheus-simple
+    criticality: test
+spec:
+  clusterIP: None
+  ports:
+    - name: prometheus
+      port: 7777
+      targetPort: http
+      protocol: TCP
+  selector:
+    statefulset.kubernetes.io/pod-name: keycloak-authn-cuda-0
